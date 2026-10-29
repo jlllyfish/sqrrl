@@ -66,7 +66,7 @@ def _strip(v):
     return re.sub(r"[  ]+", " ", v).strip() if isinstance(v, str) else v
 
 
-def _read_raw(content: bytes, kind: str) -> pd.DataFrame:
+def read_raw(content: bytes, kind: str) -> pd.DataFrame:
     if kind == "csv":
         for enc in ("utf-8-sig", "cp1252"):
             try:
@@ -129,7 +129,7 @@ def read_table(content: bytes, kind: str, compact_text: bool = False,
     `known_headers` : en-têtes déjà présents dans la table, pour repérer la bonne ligne d'en-tête
     et nommer les colonnes d'un fichier sans en-tête (dans l'ordre).
     """
-    raw = _read_raw(content, kind)
+    raw = read_raw(content, kind)
     raw = raw.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
     if raw.empty:
         return pd.DataFrame()

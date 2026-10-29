@@ -38,7 +38,8 @@ from grist import (
     list_tables,
     to_cell,
 )
-from tableur import ColumnRegistry, read_table
+from motifs import PRESETS, extract
+from tableur import ColumnRegistry, read_raw, read_table
 from utils import unique_table_names
 
 app = Flask(__name__)
@@ -54,16 +55,59 @@ def sse(data: dict) -> str:
     return f"data: {json.dumps(data, default=str)}\n\n"
 
 
-def file_to_df(f: dict, ds_token: str, dossier_number: int,
-               registry: ColumnRegistry, options: dict) -> pd.DataFrame:
+def read_file(content: bytes, kind: str, registry: ColumnRegistry, options: dict,
+              preset: str | None = None) -> tuple[pd.DataFrame, dict | None]:
+    """
+    Lit un tableur : colonnes telles quelles, ou colonnes cibles reconnues par leur contenu (`preset`).
+    Retourne (DataFrame aux IDs du registre, diagnostic d'extraction ou None).
+    """
+    if preset in PRESETS:
+        df, diag = extract(read_raw(content, kind), PRESETS[preset]["targets"])
+        return registry.apply(df), diag
+    df = read_table(content, kind, known_headers=registry.known_headers(), **options)
+    return registry.apply(df), None
+
+
+def file_to_df(f: dict, ds_token: str, dossier_number: int, registry: ColumnRegistry,
+               options: dict, preset: str | None = None, content: bytes | None = None) -> pd.DataFrame:
     """Lit un tableur DS et retourne un DataFrame aux colonnes identifiées par le registre de la table."""
     filename = (f.get("filename") or "").strip()
-    df = read_table(download_file(f["url"], ds_token), f["kind"],
-                    known_headers=registry.known_headers(), **options)
-    df = registry.apply(df)
+    if content is None:
+        content = download_file(f["url"], ds_token)
+    df, _ = read_file(content, f["kind"], registry, options, preset)
     df.insert(0, registry.id_for("source_filename"), filename)
     df.insert(0, registry.id_for("dossier_number"), dossier_number)
     return df
+
+
+def build_preview(content: bytes, f: dict, options: dict, preset: str | None) -> dict:
+    """Aperçu d'un fichier d'exemple : colonnes, types, 5 premières lignes, nombre de lignes, diagnostic."""
+    reg = ColumnRegistry()
+    df, diag = read_file(content, f["kind"], reg, options, preset)
+    schema = []
+    for col in df.columns:
+        non_null = df[col].dropna()
+        sample = to_cell(non_null.iloc[0]) if not non_null.empty else None
+        schema.append({"id": col, "original": reg.labels.get(col, col), "type": infer_grist_type(df[col]),
+                       "sample": "" if sample is None else str(sample)})
+    return {
+        "preset": preset,
+        "schema": schema,
+        "headers": [reg.labels.get(c, c) for c in df.columns],
+        "rows": [[to_cell(v) for v in row] for row in df.head(5).itertuples(index=False, name=None)],
+        "sample_rows": len(df),
+        "diag": diag,
+    }
+
+
+def suggest_preset(content: bytes, kind: str) -> str | None:
+    """Modèle dont la colonne clé est reconnue dans le fichier d'exemple, s'il y en a un."""
+    raw = read_raw(content, kind)
+    for key, preset in PRESETS.items():
+        df, _ = extract(raw, preset["targets"])
+        if len(df):
+            return key
+    return None
 
 
 def _read_options(body: dict) -> dict:
@@ -149,26 +193,19 @@ def get_fields():
             fields_info = []
             with_files = [lb for lb, info in fields.items() if info["files"]]
             for label, info in fields.items():
-                schema, headers, rows, total_rows = [], [], [], None
+                preview = {"schema": [], "headers": [], "rows": [], "sample_rows": None, "diag": None,
+                           "preset": None}
+                example = None
                 if info["files"]:
                     f = info["files"][0]
+                    example = {k: f.get(k) for k in ("url", "filename", "kind", "contentType")}
                     pos = with_files.index(label) + 1
                     yield ndjson({"type": "progress",
                                   "msg": f"Aperçu {pos}/{len(with_files)} « {label} » : lecture de "
                                          f"{(f.get('filename') or '').strip()}…"})
                     try:
-                        reg = ColumnRegistry()
-                        df = file_to_df(f, ds_token, 0, reg, options)
-                        for col in df.columns:
-                            non_null = df[col].dropna()
-                            sample = to_cell(non_null.iloc[0]) if not non_null.empty else None
-                            schema.append({"id": col, "original": reg.labels.get(col, col),
-                                           "type": infer_grist_type(df[col]),
-                                           "sample": "" if sample is None else str(sample)})
-                        headers = [reg.labels.get(c, c) for c in df.columns]
-                        rows = [[to_cell(v) for v in row]
-                                for row in df.head(5).itertuples(index=False, name=None)]
-                        total_rows = len(df)
+                        content = download_file(f["url"], ds_token)
+                        preview = build_preview(content, f, options, suggest_preset(content, f["kind"]))
                     except Exception:  # noqa: BLE001 — fichier usager illisible : l'aperçu est juste omis
                         traceback.print_exc()
 
@@ -179,21 +216,38 @@ def get_fields():
                     "found": bool(info["files"]),
                     "pj_seen": info["pj_seen"],
                     "exts": info["exts"],
-                    "sample_rows": total_rows,
-                    "schema": schema,
-                    "headers": headers,
-                    "rows": rows,
+                    "example": example,
+                    **preview,
                 })
 
             # Champs avec tableur trouvé d'abord, puis les plus fréquents
             fields_info.sort(key=lambda f: (not f["found"], -f["seen"]))
-            yield ndjson({"type": "result", "title": title, "scanned": scanned, "fields": fields_info})
+            yield ndjson({"type": "result", "title": title, "scanned": scanned, "fields": fields_info,
+                          "presets": [{"value": k, "label": p["label"]} for k, p in PRESETS.items()]})
         except (requests.RequestException, ValueError) as e:
             traceback.print_exc()
             yield ndjson({"type": "error", "error": str(e)})
 
     return Response(stream_with_context(generate()), mimetype="application/x-ndjson",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/preview", methods=["POST"])
+def preview_field():
+    """Recalcule l'aperçu d'un champ avec un autre mode de lecture (colonnes du fichier ou modèle)."""
+    body = request.json or {}
+    example, ds_token = body.get("example") or {}, body.get("ds_token")
+    if not ds_token or not example.get("url") or example.get("kind") not in ("xlsx", "xls", "ods", "csv"):
+        return jsonify({"error": "Paramètres manquants"}), 400
+    preset = body.get("preset") if body.get("preset") in PRESETS else None
+    try:
+        content = download_file(example["url"], ds_token)
+        return Response(json.dumps(build_preview(content, example, _read_options(body), preset), default=str),
+                        mimetype="application/json")
+    except requests.RequestException as e:
+        return jsonify({"error": f"Téléchargement impossible (lien expiré ?) : {e}"}), 502
+    except Exception as e:  # noqa: BLE001 — fichier usager illisible
+        return jsonify({"error": f"Lecture impossible : {e}"}), 422
 
 
 @app.route("/api/import", methods=["POST"])
@@ -214,6 +268,7 @@ def start_import():
         "states": _parse_states(body.get("states")),
         "groupe_numbers": _parse_groupes(body.get("groupe_numbers")),
         "options": _read_options(body),
+        "presets": {k: v for k, v in (body.get("presets") or {}).items() if v in PRESETS},
         # En-têtes du fichier d'aperçu, par champ : référence pour les fichiers sans en-tête
         "templates": {k: [str(h) for h in v][:200] for k, v in (body.get("templates") or {}).items()
                       if isinstance(v, list)},
@@ -306,9 +361,13 @@ def import_stream():
                     # Téléchargement + concaténation
                     try:
                         reg = registries[lab]
-                        dfs = [file_to_df(f, ds_token, num, reg, job["options"])
+                        dfs = [file_to_df(f, ds_token, num, reg, job["options"], job["presets"].get(lab))
                                for f in files]
                         merged = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+                        if merged.empty:
+                            stats[lab]["skipped"] += 1
+                            yield ev("skip", reason="no_rows")
+                            continue
                         col_labels = reg.labels
                     except Exception as e:  # noqa: BLE001 — fichier usager : toute erreur de lecture est isolée au dossier
                         stats[lab]["errors"] += 1

@@ -354,3 +354,18 @@
     transform: rotate(360deg);
   }
 }
+
+/* Mode de lecture d'un champ */
+.sqrrl-read-mode-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.sqrrl-read-mode {
+  width: auto;
+  max-width: 100%;
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+  font-size: 0.875rem;
+}

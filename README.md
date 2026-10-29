@@ -21,6 +21,14 @@ Seule la première feuille est lue. Sont gérés automatiquement :
 - fichiers sans en-tête : colonnes nommées d'après le fichier montré en aperçu (même ordre) ;
 - colonnes et lignes vides, nombres entiers lus comme décimaux.
 
+### Lecture par modèle (contenu des colonnes)
+
+Quand les fichiers ne respectent pas le modèle, un champ peut être lu « par modèle » : les colonnes utiles sont
+reconnues à leur contenu, quels que soient l'en-tête, la position ou la présentation. Modèle disponible :
+**Liste de bovins** (n° de bovin `FR` + 10 chiffres, EDE 8 chiffres avec préfixe « EDE » toléré). Il est proposé
+automatiquement quand le fichier d'exemple s'y prête ; seules les lignes avec un n° de bovin valide sont gardées.
+Les modèles se définissent dans `motifs.py`.
+
 Options : ignorer les lignes sans valeur en 1re colonne (totaux, notes), supprimer les espaces dans les valeurs texte (identifiants type « FR64 1514 3204 »).
 
 ## Installation

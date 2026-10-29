@@ -376,6 +376,7 @@ $("btn-confirm-filters").addEventListener("click", async () => {
     }
 
     state.fields = data.fields;
+    state.presets = data.presets || [];
     state.scanned = data.scanned;
     state.selected = new Set(data.fields.filter((f) => f.found).map((f) => f.label));
 
@@ -482,10 +483,6 @@ function fieldCard(f, checked) {
           ? `Fichiers déposés dans ${f.pj_seen} dossier${f.pj_seen > 1 ? "s" : ""} : ${exts}`
           : "Aucun fichier déposé dans les dossiers analysés"
       }</p>`;
-  const rowsInfo =
-    f.sample_rows != null
-      ? `<p class="fr-text--xs fr-text-mention--grey fr-mt-1w fr-mb-0">Exemple : ${f.sample_rows} ligne${f.sample_rows > 1 ? "s" : ""} après nettoyage</p>`
-      : "";
   div.innerHTML = `
     <div class="sqrrl-field-card-header">
       <label class="sqrrl-field-label">
@@ -497,12 +494,68 @@ function fieldCard(f, checked) {
         <span class="fr-text--sm fr-text-mention--grey">→ ${esc(f.table_name)}</span>
       </div>
     </div>
-    ${f.headers.length ? renderMiniGrid(f) + rowsInfo : f.found ? '<p class="fr-text--sm fr-text-mention--grey fr-mt-1w">Aperçu indisponible</p>' : diag}
+    ${f.found ? readModeSelect(f) : ""}
+    <div class="sqrrl-preview">${f.found ? previewHtml(f) : diag}</div>
   `;
   const cb = div.querySelector(".field-check");
   cb.dataset.label = f.label; // via dataset : pas d'échappement nécessaire
   cb.addEventListener("change", onFieldCheck);
+  const sel = div.querySelector(".sqrrl-read-mode");
+  if (sel) sel.addEventListener("change", () => changeReadMode(f, sel, div.querySelector(".sqrrl-preview")));
   return div;
+}
+
+// Choix du mode de lecture : colonnes du fichier telles quelles, ou modèle reconnu par le contenu
+function readModeSelect(f) {
+  const opts = [{ value: "", label: "Colonnes du fichier, telles quelles" }, ...(state.presets || [])];
+  return `
+    <div class="sqrrl-read-mode-group fr-mt-1w">
+      <label class="fr-text--sm fr-mb-0">Lecture des fichiers :</label>
+      <select class="fr-select sqrrl-read-mode">
+        ${opts
+          .map((o) => `<option value="${esc(o.value)}" ${(f.preset || "") === o.value ? "selected" : ""}>${esc(o.label)}</option>`)
+          .join("")}
+      </select>
+    </div>`;
+}
+
+function previewHtml(f) {
+  if (!f.headers.length) {
+    return f.preset
+      ? '<p class="fr-text--sm sqrrl-ko fr-mt-1w">Aucune colonne reconnue dans le fichier d\'exemple pour ce modèle.</p>'
+      : '<p class="fr-text--sm fr-text-mention--grey fr-mt-1w">Aperçu indisponible</p>';
+  }
+  let info = `Exemple « ${esc((f.example?.filename || "").trim())} » : ${f.sample_rows} ligne${f.sample_rows > 1 ? "s" : ""} retenue${f.sample_rows > 1 ? "s" : ""}`;
+  if (f.diag) {
+    const parts = Object.entries(f.diag).map(([name, cols]) =>
+      cols.length ? `${esc(name)} ← colonne${cols.length > 1 ? "s" : ""} ${cols.join(", ")}` : `${esc(name)} : non trouvé`,
+    );
+    info += ` · ${parts.join(" · ")}`;
+  }
+  return renderMiniGrid(f) + `<p class="fr-text--xs fr-text-mention--grey fr-mt-1w fr-mb-0">${info}</p>`;
+}
+
+async function changeReadMode(f, sel, box) {
+  const preset = sel.value || null;
+  sel.disabled = true;
+  box.innerHTML = '<p class="fr-text--sm sqrrl-wait fr-mt-1w">Lecture du fichier d\'exemple…</p>';
+  try {
+    const res = await fetch("/api/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ds_token: $("ds_token").value.trim(), example: f.example, preset, ...readOptions() }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    Object.assign(f, data);
+    box.innerHTML = previewHtml(f);
+  } catch (e) {
+    sel.value = f.preset || "";
+    box.innerHTML = previewHtml(f);
+    toast("Erreur : " + e.message, "error");
+  } finally {
+    sel.disabled = false;
+  }
 }
 
 function renderMiniGrid(f) {
@@ -584,6 +637,9 @@ $("btn-import").addEventListener("click", async () => {
         demarche_number: parseInt(demarche_number),
         on_duplicate,
         selected_labels: [...state.selected],
+        presets: Object.fromEntries(
+          state.fields.filter((f) => state.selected.has(f.label) && f.preset).map((f) => [f.label, f.preset]),
+        ),
         templates: Object.fromEntries(
           state.fields
             .filter((f) => state.selected.has(f.label))
@@ -679,7 +735,7 @@ $("btn-import").addEventListener("click", async () => {
     }
     if (msg.type === "skip") {
       bump(msg, "skipped");
-      const reason = msg.reason === "duplicate" ? "déjà importé" : "sans PJ";
+      const reason = { duplicate: "déjà importé", no_rows: "aucune ligne reconnue dans le fichier" }[msg.reason] || "sans PJ";
       addLog(`– Dossier #${msg.dossier} · ${msg.table} ignoré (${reason})`, "sqrrl-log-skip");
     }
     if (msg.type === "error") {
