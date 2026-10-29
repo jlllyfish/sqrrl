@@ -85,7 +85,7 @@ def read_table(content: bytes, kind: str, compact_text: bool = False,
         seen[k] = seen.get(k, 0) + 1
 
     first_header, short = {}, {}  # clé canonique → libellé / nom court de la 1re occurrence
-    for h, rh in zip(headers, raw_headers):
+    for h, rh in zip(headers, raw_headers, strict=True):
         first_header.setdefault(canon(h), h)
         short.setdefault(h, short_name(rh) or h)
 
@@ -164,6 +164,6 @@ class ColumnRegistry:
         short = df.attrs.get("short_names", {})
         ids = [self.id_for(c, short.get(c)) for c in df.columns]
         out = pd.DataFrame(index=df.index)
-        for cid, col in zip(ids, df.columns):
+        for cid, col in zip(ids, df.columns, strict=True):
             out[cid] = df[col] if cid not in out else out[cid].combine_first(df[col])
         return out

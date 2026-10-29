@@ -59,12 +59,14 @@ fragment DossierPJ on Dossier {
 def _dossiers_query(root: str, with_order: bool = False) -> str:
     """Query de liste de dossiers, via la démarche ou un groupe instructeur."""
     if root == "demarche":
-        head = "query Q($demarcheNumber: Int!, $state: DossierState, $after: String{o}) {{\n  demarche(number: $demarcheNumber) {{"
+        var, field = "$demarcheNumber: Int!", "demarche(number: $demarcheNumber)"
     else:
-        head = "query Q($groupeNumber: Int!, $state: DossierState, $after: String{o}) {{\n  groupeInstructeur(number: $groupeNumber) {{"
-    head = head.format(o=", $order: Order" if with_order else "")
+        var, field = "$groupeNumber: Int!", "groupeInstructeur(number: $groupeNumber)"
+    order_var = ", $order: Order" if with_order else ""
     order_arg = ", order: $order" if with_order else ""
-    return head + f"""
+    return f"""
+query Q({var}, $state: DossierState, $after: String{order_var}) {{
+  {field} {{
     dossiers(first: 100, after: $after, state: $state{order_arg}) {{
       pageInfo {{ hasNextPage endCursor }}
       nodes {{ ...DossierPJ }}
@@ -191,7 +193,7 @@ def get_schema_pj_labels(demarche_number: int, token: str) -> list[str]:
     """Labels des champs PJ déclarés dans la révision active (vide si le schéma est inaccessible)."""
     try:
         data = _gql(token, QUERY_SCHEMA, {"demarcheNumber": demarche_number})
-    except Exception:
+    except (requests.RequestException, ValueError):
         return []
     rev = ((data.get("demarche") or {}).get("activeRevision")) or {}
     labels = []
@@ -240,7 +242,9 @@ def collect_fields(demarche_number, token, states=None, groupe_numbers=None,
     """
     title = get_demarche_meta(demarche_number, token)["title"]
     schema_labels = get_schema_pj_labels(demarche_number, token)
-    new = lambda: {"files": [], "seen": 0, "pj_seen": 0, "exts": {}}
+    def new():
+        return {"files": [], "seen": 0, "pj_seen": 0, "exts": {}}
+
     fields = {label: new() for label in schema_labels}
 
     scanned = 0
@@ -260,7 +264,7 @@ def collect_fields(demarche_number, token, states=None, groupe_numbers=None,
                     entry["files"] = sheets
         if scanned >= max_dossiers:
             break
-        if scanned >= min_dossiers and all(fields[l]["files"] for l in schema_labels):
+        if scanned >= min_dossiers and all(fields[lb]["files"] for lb in schema_labels):
             break
     return title, fields, scanned
 

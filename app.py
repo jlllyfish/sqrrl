@@ -6,13 +6,37 @@ import time
 import traceback
 
 import pandas as pd
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+import requests
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    render_template,
+    request,
+    stream_with_context,
+)
 
-from demarche import DOSSIER_STATE_LABELS, collect_fields, download_file, get_demarche_meta, iter_dossiers
+from demarche import (
+    DOSSIER_STATE_LABELS,
+    collect_fields,
+    download_file,
+    get_demarche_meta,
+    iter_dossiers,
+)
 from grist import (
-    add_rows, build_columns, check_existing_dossier, create_table, delete_rows,
-    df_to_records, ensure_columns, find_table, get_doc, infer_grist_type, list_columns,
-    list_tables, to_cell,
+    add_rows,
+    build_columns,
+    check_existing_dossier,
+    create_table,
+    delete_rows,
+    df_to_records,
+    ensure_columns,
+    find_table,
+    get_doc,
+    infer_grist_type,
+    list_columns,
+    list_tables,
+    to_cell,
 )
 from tableur import ColumnRegistry, read_table
 from utils import unique_table_names
@@ -23,6 +47,7 @@ app = Flask(__name__)
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 JOB_TTL = 300  # secondes
+DUPLICATE_MODES = ("skip", "update", "append")
 
 
 def sse(data: dict) -> str:
@@ -71,8 +96,8 @@ def get_meta():
         meta = get_demarche_meta(int(demarche_number), ds_token)
         meta["states"] = [{"value": k, "label": v} for k, v in DOSSIER_STATE_LABELS.items()]
         return jsonify(meta)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except (requests.RequestException, ValueError) as e:
+        return jsonify({"error": str(e)}), 502
 
 
 @app.route("/api/grist-check", methods=["POST"])
@@ -85,7 +110,7 @@ def grist_check():
         return jsonify(get_doc(body["doc_id"].strip(), body["grist_token"].strip()))
     except (PermissionError, LookupError) as e:
         return jsonify({"error": str(e)}), 400
-    except Exception as e:
+    except requests.RequestException as e:
         return jsonify({"error": f"Grist injoignable : {e}"}), 502
 
 
@@ -124,7 +149,7 @@ def get_fields():
                     rows = [[to_cell(v) for v in row]
                             for row in df.head(5).itertuples(index=False, name=None)]
                     total_rows = len(df)
-                except Exception:
+                except Exception:  # noqa: BLE001 — fichier usager illisible : l'aperçu est juste omis
                     traceback.print_exc()
 
             fields_info.append({
@@ -145,7 +170,7 @@ def get_fields():
 
         return Response(json.dumps({"title": title, "scanned": scanned, "fields": fields_info}, default=str),
                         mimetype="application/json")
-    except Exception as e:
+    except (requests.RequestException, ValueError) as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -163,7 +188,7 @@ def start_import():
         "grist_token": body["grist_token"],
         "doc_id": body["doc_id"],
         "demarche_number": int(body["demarche_number"]),
-        "on_duplicate": body.get("on_duplicate") if body.get("on_duplicate") in ("skip", "update", "append") else "skip",
+        "on_duplicate": body.get("on_duplicate") if body.get("on_duplicate") in DUPLICATE_MODES else "skip",
         "selected_labels": list(body["selected_labels"]),
         "states": _parse_states(body.get("states")),
         "groupe_numbers": _parse_groupes(body.get("groupe_numbers")),
@@ -211,7 +236,7 @@ def import_stream():
                                                states=job["states"], groupe_numbers=job["groupe_numbers"]):
                 if kind == "meta":
                     yield sse({"type": "meta", "title": payload["title"],
-                               "tables": [{"label": l, "table": tables[l]} for l in labels]})
+                               "tables": [{"label": lb, "table": tables[lb]} for lb in labels]})
                     continue
                 if kind == "done":
                     yield sse({"type": "done", "total": payload["total"], "stats": stats})
@@ -222,9 +247,9 @@ def import_stream():
                 yield sse({"type": "progress", "step": step, "dossier": num})
 
                 for lab in labels:
-                    def ev(type_, **kw):
-                        return sse({"type": type_, "step": step, "dossier": num,
-                                    "label": lab, "table": tables[lab], **kw})
+                    def ev(type_, *, _step=step, _num=num, _lab=lab, **kw):
+                        return sse({"type": type_, "step": _step, "dossier": _num,
+                                    "label": _lab, "table": tables[_lab], **kw})
 
                     files = fields.get(lab, [])
                     if not files:
@@ -237,7 +262,7 @@ def import_stream():
                     if exists[lab] and on_duplicate != "append":
                         try:
                             existing_ids = check_existing_dossier(doc_id, tables[lab], num, grist_token)
-                        except Exception as e:
+                        except requests.RequestException as e:
                             stats[lab]["errors"] += 1
                             yield ev("error", msg=f"Vérification doublon : {e}")
                             continue
@@ -253,7 +278,7 @@ def import_stream():
                                for f in files]
                         merged = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
                         col_labels = reg.labels
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 — fichier usager : toute erreur de lecture est isolée au dossier
                         stats[lab]["errors"] += 1
                         yield ev("error", msg=f"Lecture fichier : {e}")
                         continue
@@ -266,7 +291,7 @@ def import_stream():
                             exists[lab] = True
                         if set(merged.columns) - colmap[lab].keys():
                             colmap[lab].update(ensure_columns(doc_id, tables[lab], columns, grist_token))
-                    except Exception as e:
+                    except (requests.RequestException, KeyError, IndexError, ValueError, TypeError) as e:
                         traceback.print_exc()
                         stats[lab]["errors"] += 1
                         yield ev("error", msg=f"Table / colonnes : {e}")
@@ -280,11 +305,11 @@ def import_stream():
                             delete_rows(doc_id, tables[lab], existing_ids, grist_token)
                         stats[lab]["imported"] += 1
                         yield ev("imported", rows=len(records), replaced=bool(existing_ids))
-                    except Exception as e:
+                    except (requests.RequestException, RuntimeError, ValueError, TypeError) as e:
                         stats[lab]["errors"] += 1
                         yield ev("error", msg=str(e))
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — dernier filet : le flux SSE doit signaler l'échec au navigateur
             traceback.print_exc()
             yield sse({"type": "fatal", "msg": str(e)})
 
@@ -293,4 +318,4 @@ def import_stream():
 
 
 if __name__ == "__main__":
-    app.run(debug=os.getenv("FLASK_DEBUG") == "1", port=int(os.getenv("PORT", 5000)), threaded=True)
+    app.run(debug=os.getenv("FLASK_DEBUG") == "1", port=int(os.getenv("PORT", "5000")), threaded=True)

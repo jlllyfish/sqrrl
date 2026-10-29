@@ -98,7 +98,7 @@ def ensure_columns(doc_id: str, table_id: str, columns: list[dict], api_key: str
             json={"columns": missing}, headers=_headers(api_key), timeout=TIMEOUT,
         )
         r.raise_for_status()
-        for col, created in zip(missing, r.json().get("columns", [])):
+        for col, created in zip(missing, r.json().get("columns", []), strict=False):
             mapping[col["id"]] = created["id"]
     return mapping
 
@@ -197,6 +197,6 @@ def df_to_records(df: pd.DataFrame, colmap: dict[str, str] | None = None) -> lis
     types = {c: infer_grist_type(df[c]) for c in df.columns}
     keys = [(colmap or {}).get(c, c) for c in df.columns]
     return [
-        {k: to_cell(v, types[c]) for k, c, v in zip(keys, df.columns, row)}
+        {k: to_cell(v, types[c]) for k, c, v in zip(keys, df.columns, row, strict=True)}
         for row in df.itertuples(index=False, name=None)
     ]
