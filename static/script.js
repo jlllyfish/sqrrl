@@ -308,6 +308,8 @@ $("btn-confirm-filters").addEventListener("click", async () => {
 
   const btn = $("btn-confirm-filters");
   setLoading(btn, true, "Confirmer les filtres");
+  hide("step-2");
+  const steps = startSteps("analyze-steps");
 
   try {
     const res = await fetch("/api/fields", {
@@ -321,10 +323,18 @@ $("btn-confirm-filters").addEventListener("click", async () => {
         ...readOptions(),
       }),
     });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
+    if (!res.ok && !res.body) throw new Error(`Erreur serveur (${res.status})`);
+    let data = null;
+    await readNdjson(res, (msg) => {
+      if (msg.type === "progress") steps.add(msg.msg);
+      if (msg.type === "error") throw new Error(msg.error);
+      if (msg.type === "result") data = msg;
+      if (msg.error) throw new Error(msg.error);
+    });
+    if (!data) throw new Error("Analyse interrompue");
+    steps.done("Analyse terminée");
     if (!data.fields.length) {
-      toast("Aucun champ PJ tableur trouvé avec ces filtres", "warning");
+      toast("Aucun champ PJ trouvé avec ces filtres", "warning");
       return;
     }
 
@@ -341,11 +351,59 @@ $("btn-confirm-filters").addEventListener("click", async () => {
     renderFields(data.fields);
     show("step-2");
   } catch (e) {
+    steps.fail(e.message);
     toast("Erreur : " + e.message, "error");
   } finally {
     setLoading(btn, false, "Confirmer les filtres");
   }
 });
+
+// Lit une réponse NDJSON (un objet JSON par ligne) au fil de l'eau
+async function readNdjson(res, onMessage) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (value) buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = done ? "" : lines.pop();
+    for (const line of lines) if (line.trim()) onMessage(JSON.parse(line));
+    if (done) break;
+  }
+}
+
+// Liste d'étapes affichée pendant un traitement : l'étape en cours est marquée « … »
+function startSteps(id) {
+  const ul = $(id);
+  ul.innerHTML = "";
+  ul.classList.remove("fr-hidden");
+  let current = null;
+  const close = (cls, mark) => {
+    if (!current) return;
+    current.className = cls;
+    current.querySelector(".sqrrl-step-mark").textContent = mark;
+  };
+  const add = (text, cls = "sqrrl-step--current", mark = "…") => {
+    close("sqrrl-step--done", "✓");
+    current = document.createElement("li");
+    current.className = cls;
+    current.innerHTML = `<span class="sqrrl-step-mark" aria-hidden="true">${mark}</span> `;
+    current.append(document.createTextNode(text));
+    ul.appendChild(current);
+  };
+  return {
+    add,
+    done: (text) => {
+      add(text, "sqrrl-step--done", "✓");
+      current = null;
+    },
+    fail: (text) => {
+      add(text, "sqrrl-step--error", "✗");
+      current = null;
+    },
+  };
+}
 
 function readOptions() {
   return {
@@ -497,6 +555,14 @@ $("btn-import").addEventListener("click", async () => {
         demarche_number: parseInt(demarche_number),
         on_duplicate,
         selected_labels: [...state.selected],
+        templates: Object.fromEntries(
+          state.fields
+            .filter((f) => state.selected.has(f.label))
+            .map((f) => [
+              f.label,
+              f.schema.filter((c) => !["dossier_number", "source_filename"].includes(c.id)).map((c) => c.original),
+            ]),
+        ),
         states: state.selectedStates,
         groupe_numbers: state.selectedGroupes,
         ...readOptions(),

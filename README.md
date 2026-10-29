@@ -17,6 +17,8 @@ Import des pièces jointes tableur (.xlsx, .xls, .ods) d'une démarche **Démarc
 Seule la première feuille est lue. Sont gérés automatiquement :
 - en-têtes écrits différemment d'un fichier à l'autre (retours à la ligne, espaces, ponctuation) : rapprochés dans la même colonne Grist ;
 - blocs de colonnes recopiés côte à côte au lieu d'ajouter des lignes : empilés ;
+- lignes de titre au-dessus du tableau ignorées, ligne d'en-tête repérée automatiquement ;
+- fichiers sans en-tête : colonnes nommées d'après le fichier montré en aperçu (même ordre) ;
 - colonnes et lignes vides, nombres entiers lus comme décimaux.
 
 Options : ignorer les lignes sans valeur en 1re colonne (totaux, notes), supprimer les espaces dans les valeurs texte (identifiants type « FR64 1514 3204 »).

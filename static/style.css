@@ -322,3 +322,42 @@
   margin: 1.5rem 0 0.5rem;
   font-weight: 700;
 }
+
+/* Étapes de l'analyse */
+.sqrrl-steps {
+  list-style: none;
+  padding: 0.75rem 1rem;
+  margin: 0;
+  border-left: 3px solid var(--border-action-high-blue-france);
+  background: var(--background-alt-grey);
+  font-size: 0.875rem;
+}
+.sqrrl-steps li {
+  padding: 0.15rem 0;
+}
+.sqrrl-step-mark {
+  display: inline-block;
+  width: 1.2rem;
+  font-weight: 700;
+}
+.sqrrl-step--done {
+  color: var(--text-mention-grey);
+}
+.sqrrl-step--done .sqrrl-step-mark {
+  color: var(--text-default-success);
+}
+.sqrrl-step--current {
+  color: var(--text-default-grey);
+  font-weight: 500;
+}
+.sqrrl-step--current .sqrrl-step-mark {
+  animation: sqrrl-blink 1s ease-in-out infinite;
+}
+.sqrrl-step--error {
+  color: var(--text-default-error);
+}
+@keyframes sqrrl-blink {
+  50% {
+    opacity: 0.2;
+  }
+}

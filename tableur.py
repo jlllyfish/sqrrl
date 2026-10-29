@@ -19,6 +19,7 @@ from pandas.api import types as pt
 from utils import RESERVED_COL_IDS, sanitize_col
 
 MAX_ID_LEN = 40
+TECH_COLS = {"dossier_number", "source_filename"}
 
 
 def clean_header(h) -> str:
@@ -41,6 +42,22 @@ def short_name(raw_header: str) -> str:
     return clean_header(first)
 
 
+MIN_PREFIX = 8
+
+
+def match_key(key: str, keys) -> str | None:
+    """
+    Clé connue correspondant à `key` : identique, ou l'une est le début de l'autre
+    (« Numéro des bovins » ↔ « Numéro des bovins de l'envoi FR + 10 chiffres… »).
+    """
+    if key in keys:
+        return key
+    if len(key) < MIN_PREFIX:
+        return None
+    candidates = [k for k in keys if len(k) >= MIN_PREFIX and (k.startswith(key) or key.startswith(k))]
+    return max(candidates, key=len) if candidates else None
+
+
 def _compact(v):
     return re.sub(r"\s+", "", v) if isinstance(v, str) else v
 
@@ -61,20 +78,71 @@ def _read_raw(content: bytes, kind: str) -> pd.DataFrame:
     return pd.read_excel(io.BytesIO(content), header=None, engine="odf" if kind == "ods" else None)
 
 
+# Valeur « de donnée » plutôt que d'en-tête : nombre, date, ou code type FR6415263801 / 64 120 051
+_DATA_RE = re.compile(r"^([A-Z]{2}\s?)?\d[\d\s.,/:-]{3,}$")
+HEADER_SCAN_ROWS = 15
+
+
+def _is_data(v) -> bool:
+    if isinstance(v, (int, float, pd.Timestamp)) and not isinstance(v, bool):
+        return True
+    return isinstance(v, str) and bool(_DATA_RE.match(v.strip()))
+
+
+def detect_header(raw: pd.DataFrame, known_headers: list[str] | None = None) -> tuple[int | None, int]:
+    """
+    Repère la ligne d'en-tête parmi les premières lignes :
+    - ignore les lignes de titre (une seule cellule remplie, ex. « LISTE DES ANIMAUX ») ;
+    - privilégie une ligne qui reprend des en-têtes déjà connus pour cette table ;
+    - si la 1re ligne exploitable contient surtout des données, le fichier n'a pas d'en-tête.
+    Retourne (index de la ligne d'en-tête ou None, index de la 1re ligne de données).
+    """
+    known = {canon(h) for h in known_headers or []}
+    ncols = raw.shape[1]
+    first_candidate = None
+    for i in range(min(HEADER_SCAN_ROWS, len(raw))):
+        cells = [v for v in raw.iloc[i] if not pd.isna(v)]
+        if len(cells) < min(2, ncols):
+            continue  # titre ou ligne quasi vide
+        hits = sum(match_key(canon(c), known) is not None for c in cells if isinstance(c, str))
+        if known and hits >= max(1, len(cells) // 2):
+            return i, i + 1
+        if first_candidate is None:
+            first_candidate = i
+            if sum(_is_data(c) for c in cells) >= len(cells) / 2:
+                break  # la 1re ligne exploitable est déjà une ligne de données
+            if not known:
+                return i, i + 1
+    if first_candidate is None:
+        return None, 0
+    cells = [v for v in raw.iloc[first_candidate] if not pd.isna(v)]
+    if sum(_is_data(c) for c in cells) >= len(cells) / 2:
+        return None, first_candidate
+    return first_candidate, first_candidate + 1
+
+
 def read_table(content: bytes, kind: str, compact_text: bool = False,
-               require_first_col: bool = True) -> pd.DataFrame:
+               require_first_col: bool = True, known_headers: list[str] | None = None) -> pd.DataFrame:
     """
     Lit la première feuille et retourne un DataFrame aux en-têtes nettoyés, blocs répétés empilés.
     `require_first_col` : ignore les lignes dont la 1re colonne est vide (totaux, notes…).
+    `known_headers` : en-têtes déjà présents dans la table, pour repérer la bonne ligne d'en-tête
+    et nommer les colonnes d'un fichier sans en-tête (dans l'ordre).
     """
     raw = _read_raw(content, kind)
-    raw = raw.dropna(how="all").dropna(axis=1, how="all")
+    raw = raw.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
     if raw.empty:
         return pd.DataFrame()
+    raw.columns = range(raw.shape[1])
 
-    raw_headers = ["" if pd.isna(v) else str(v) for v in raw.iloc[0]]
+    header_row, data_start = detect_header(raw, known_headers)
+    if header_row is None:
+        known = list(known_headers or [])
+        raw_headers = [known[i] if i < len(known) else "" for i in range(raw.shape[1])]
+    else:
+        raw_headers = ["" if pd.isna(v) else str(v) for v in raw.iloc[header_row]]
     headers = [clean_header(h) or f"Colonne {i + 1}" for i, h in enumerate(raw_headers)]
-    body = raw.iloc[1:].reset_index(drop=True)
+    body = raw.iloc[data_start:].reset_index(drop=True)
     body.columns = range(len(headers))
 
     # Occurrence de chaque en-tête : 0 pour la 1re fois, 1 pour la 2e…
@@ -117,6 +185,7 @@ def read_table(content: bytes, kind: str, compact_text: bool = False,
                 s = s.astype("Int64")
         df[col] = s
     df.attrs["short_names"] = short
+    df.attrs["header_row"] = header_row
     return df
 
 
@@ -141,10 +210,22 @@ class ColumnRegistry:
             self.labels.setdefault(cid, label)
             self.used.add(cid.lower())
 
+    def seed_headers(self, headers: list[str]):
+        """Pré-remplit avec des en-têtes de référence (ex. ceux du fichier montré en aperçu)."""
+        for h in headers or []:
+            if clean_header(h):
+                self.id_for(h, short_name(h))
+
+    def known_headers(self) -> list[str]:
+        """Libellés des colonnes métier connues, dans l'ordre (sans dossier_number / source_filename)."""
+        return [lb for cid, lb in self.labels.items() if cid not in TECH_COLS]
+
     def id_for(self, header: str, short: str | None = None) -> str:
         key = canon(header) or "colonne"
-        if key in self.by_key:
-            return self.by_key[key]
+        found = match_key(key, self.by_key)
+        if found:
+            self.by_key[key] = self.by_key[found]
+            return self.by_key[found]
         base = re.sub(r"_+", "_", sanitize_col(short or header))
         if len(base) > MAX_ID_LEN:
             cut = base[:MAX_ID_LEN]

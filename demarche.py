@@ -232,20 +232,27 @@ def _iter_all(demarche_number, token, states=None, groupe_numbers=None, newest_f
             yield node
 
 
-def collect_fields(demarche_number, token, states=None, groupe_numbers=None,
-                   min_dossiers=100, max_dossiers=500):
+def scan_fields(demarche_number, token, states=None, groupe_numbers=None,
+                min_dossiers=100, max_dossiers=500):
     """
-    Liste les champs PJ (schéma de la démarche + dossiers les plus récents).
+    Liste les champs PJ (schéma de la démarche + dossiers les plus récents), en signalant sa progression.
     Analyse au moins `min_dossiers` dossiers, et continue jusqu'à `max_dossiers` tant qu'un champ
     du schéma n'a pas d'exemple de tableur.
-    Retourne (titre, {label: {"files", "seen", "pj_seen", "exts"}}, nb analysés).
+    yield ("progress", message)… puis ("result", (titre, {label: {...}}, nb analysés)).
     """
+    yield ("progress", "Lecture de la démarche et de ses champs pièce justificative…")
     title = get_demarche_meta(demarche_number, token)["title"]
     schema_labels = get_schema_pj_labels(demarche_number, token)
+    yield ("progress", f"{len(schema_labels)} champ(s) pièce justificative déclaré(s) dans la démarche")
+
     def new():
         return {"files": [], "seen": 0, "pj_seen": 0, "exts": {}}
 
+    def found():
+        return sum(1 for e in fields.values() if e["files"])
+
     fields = {label: new() for label in schema_labels}
+    yield ("progress", "Recherche de tableurs dans les dossiers les plus récents…")
 
     scanned = 0
     for node in _iter_all(demarche_number, token, states, groupe_numbers, newest_first=True):
@@ -262,11 +269,14 @@ def collect_fields(demarche_number, token, states=None, groupe_numbers=None,
                 entry["seen"] += 1
                 if not entry["files"]:
                     entry["files"] = sheets
+        if scanned % 100 == 0:
+            yield ("progress", f"{scanned} dossiers analysés · tableurs trouvés pour {found()} champ(s)")
         if scanned >= max_dossiers:
             break
         if scanned >= min_dossiers and all(fields[lb]["files"] for lb in schema_labels):
             break
-    return title, fields, scanned
+    yield ("progress", f"{scanned} dossiers analysés · tableurs trouvés pour {found()} champ(s)")
+    yield ("result", (title, fields, scanned))
 
 
 def iter_dossiers(demarche_number, token, states=None, groupe_numbers=None):

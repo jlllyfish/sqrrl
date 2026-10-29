@@ -18,10 +18,10 @@ from flask import (
 
 from demarche import (
     DOSSIER_STATE_LABELS,
-    collect_fields,
     download_file,
     get_demarche_meta,
     iter_dossiers,
+    scan_fields,
 )
 from grist import (
     add_rows,
@@ -58,7 +58,8 @@ def file_to_df(f: dict, ds_token: str, dossier_number: int,
                registry: ColumnRegistry, options: dict) -> pd.DataFrame:
     """Lit un tableur DS et retourne un DataFrame aux colonnes identifiées par le registre de la table."""
     filename = (f.get("filename") or "").strip()
-    df = read_table(download_file(f["url"], ds_token), f["kind"], **options)
+    df = read_table(download_file(f["url"], ds_token), f["kind"],
+                    known_headers=registry.known_headers(), **options)
     df = registry.apply(df)
     df.insert(0, registry.id_for("source_filename"), filename)
     df.insert(0, registry.id_for("dossier_number"), dossier_number)
@@ -114,65 +115,85 @@ def grist_check():
         return jsonify({"error": f"Grist injoignable : {e}"}), 502
 
 
+def ndjson(data: dict) -> str:
+    return json.dumps(data, default=str) + "\n"
+
+
 @app.route("/api/fields", methods=["POST"])
 def get_fields():
-    """Analyse les premiers dossiers et retourne les champs PJ tableur trouvés, avec aperçu."""
+    """
+    Analyse les dossiers et retourne les champs PJ tableur trouvés, avec aperçu.
+    Réponse en flux NDJSON : {"type": "progress", "msg"}… puis {"type": "result", …} ou {"type": "error"}.
+    """
     body = request.json or {}
     ds_token, demarche_number = body.get("ds_token"), body.get("demarche_number")
     if not ds_token or not demarche_number:
         return jsonify({"error": "ds_token et demarche_number requis"}), 400
+    options = _read_options(body)
 
-    try:
-        title, fields, scanned = collect_fields(
-            int(demarche_number), ds_token,
-            states=_parse_states(body.get("states")),
-            groupe_numbers=_parse_groupes(body.get("groupe_numbers")),
-        )
-        table_names = unique_table_names(fields.keys())
+    def generate():
+        try:
+            result = None
+            for kind, payload in scan_fields(
+                int(demarche_number), ds_token,
+                states=_parse_states(body.get("states")),
+                groupe_numbers=_parse_groupes(body.get("groupe_numbers")),
+            ):
+                if kind == "progress":
+                    yield ndjson({"type": "progress", "msg": payload})
+                else:
+                    result = payload
+            title, fields, scanned = result
+            table_names = unique_table_names(fields.keys())
 
-        options = _read_options(body)
-        fields_info = []
-        for label, info in fields.items():
-            schema, headers, rows, total_rows = [], [], [], None
-            if info["files"]:
-                try:
-                    reg = ColumnRegistry()
+            fields_info = []
+            with_files = [lb for lb, info in fields.items() if info["files"]]
+            for label, info in fields.items():
+                schema, headers, rows, total_rows = [], [], [], None
+                if info["files"]:
                     f = info["files"][0]
-                    df = file_to_df(f, ds_token, 0, reg, options)
-                    for col in df.columns:
-                        non_null = df[col].dropna()
-                        sample = to_cell(non_null.iloc[0]) if not non_null.empty else None
-                        schema.append({"id": col, "original": reg.labels.get(col, col),
-                                       "type": infer_grist_type(df[col]),
-                                       "sample": "" if sample is None else str(sample)})
-                    headers = [reg.labels.get(c, c) for c in df.columns]
-                    rows = [[to_cell(v) for v in row]
-                            for row in df.head(5).itertuples(index=False, name=None)]
-                    total_rows = len(df)
-                except Exception:  # noqa: BLE001 — fichier usager illisible : l'aperçu est juste omis
-                    traceback.print_exc()
+                    pos = with_files.index(label) + 1
+                    yield ndjson({"type": "progress",
+                                  "msg": f"Aperçu {pos}/{len(with_files)} « {label} » : lecture de "
+                                         f"{(f.get('filename') or '').strip()}…"})
+                    try:
+                        reg = ColumnRegistry()
+                        df = file_to_df(f, ds_token, 0, reg, options)
+                        for col in df.columns:
+                            non_null = df[col].dropna()
+                            sample = to_cell(non_null.iloc[0]) if not non_null.empty else None
+                            schema.append({"id": col, "original": reg.labels.get(col, col),
+                                           "type": infer_grist_type(df[col]),
+                                           "sample": "" if sample is None else str(sample)})
+                        headers = [reg.labels.get(c, c) for c in df.columns]
+                        rows = [[to_cell(v) for v in row]
+                                for row in df.head(5).itertuples(index=False, name=None)]
+                        total_rows = len(df)
+                    except Exception:  # noqa: BLE001 — fichier usager illisible : l'aperçu est juste omis
+                        traceback.print_exc()
 
-            fields_info.append({
-                "label": label,
-                "table_name": table_names[label],
-                "seen": info["seen"],
-                "found": bool(info["files"]),
-                "pj_seen": info["pj_seen"],
-                "exts": info["exts"],
-                "sample_rows": total_rows,
-                "schema": schema,
-                "headers": headers,
-                "rows": rows,
-            })
+                fields_info.append({
+                    "label": label,
+                    "table_name": table_names[label],
+                    "seen": info["seen"],
+                    "found": bool(info["files"]),
+                    "pj_seen": info["pj_seen"],
+                    "exts": info["exts"],
+                    "sample_rows": total_rows,
+                    "schema": schema,
+                    "headers": headers,
+                    "rows": rows,
+                })
 
-        # Champs avec tableur trouvé d'abord, puis les plus fréquents
-        fields_info.sort(key=lambda f: (not f["found"], -f["seen"]))
+            # Champs avec tableur trouvé d'abord, puis les plus fréquents
+            fields_info.sort(key=lambda f: (not f["found"], -f["seen"]))
+            yield ndjson({"type": "result", "title": title, "scanned": scanned, "fields": fields_info})
+        except (requests.RequestException, ValueError) as e:
+            traceback.print_exc()
+            yield ndjson({"type": "error", "error": str(e)})
 
-        return Response(json.dumps({"title": title, "scanned": scanned, "fields": fields_info}, default=str),
-                        mimetype="application/json")
-    except (requests.RequestException, ValueError) as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+    return Response(stream_with_context(generate()), mimetype="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.route("/api/import", methods=["POST"])
@@ -193,6 +214,9 @@ def start_import():
         "states": _parse_states(body.get("states")),
         "groupe_numbers": _parse_groupes(body.get("groupe_numbers")),
         "options": _read_options(body),
+        # En-têtes du fichier d'aperçu, par champ : référence pour les fichiers sans en-tête
+        "templates": {k: [str(h) for h in v][:200] for k, v in (body.get("templates") or {}).items()
+                      if isinstance(v, list)},
         "created": time.time(),
     }
     job_id = secrets.token_urlsafe(16)
@@ -220,6 +244,7 @@ def import_stream():
         exists = {lab: False for lab in labels}
         colmap = {lab: {} for lab in labels}         # label → {id voulu: id réel}
         registries = {lab: ColumnRegistry() for lab in labels}
+        known_cols = {lab: set() for lab in labels}     # colonnes réelles de la table Grist
         stats = {lab: {"imported": 0, "skipped": 0, "errors": 0} for lab in labels}
         step = 0
 
@@ -230,7 +255,11 @@ def import_stream():
                 if real:
                     tables[lab], exists[lab] = real, True
                     # Les en-têtes déjà présents dans Grist gardent leur colonne
-                    registries[lab].seed(list_columns(doc_id, real, grist_token))
+                    grist_cols = list_columns(doc_id, real, grist_token)
+                    registries[lab].seed(grist_cols)
+                    known_cols[lab] = {c["id"] for c in grist_cols}
+            for lab in labels:
+                registries[lab].seed_headers(job["templates"].get(lab, []))
 
             for kind, payload in iter_dossiers(job["demarche_number"], ds_token,
                                                states=job["states"], groupe_numbers=job["groupe_numbers"]):
@@ -291,6 +320,7 @@ def import_stream():
                             exists[lab] = True
                         if set(merged.columns) - colmap[lab].keys():
                             colmap[lab].update(ensure_columns(doc_id, tables[lab], columns, grist_token))
+                            known_cols[lab].update(colmap[lab].values())
                     except (requests.RequestException, KeyError, IndexError, ValueError, TypeError) as e:
                         traceback.print_exc()
                         stats[lab]["errors"] += 1
@@ -299,7 +329,7 @@ def import_stream():
 
                     # Insertion, puis suppression des anciennes lignes en mode « Remplacer »
                     try:
-                        records = df_to_records(merged, colmap[lab])
+                        records = df_to_records(merged, colmap[lab], all_cols=known_cols[lab])
                         add_rows(doc_id, tables[lab], records, grist_token)
                         if existing_ids and on_duplicate == "update":
                             delete_rows(doc_id, tables[lab], existing_ids, grist_token)

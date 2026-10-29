@@ -193,10 +193,16 @@ def build_columns(df: pd.DataFrame, labels: dict[str, str]) -> list[dict]:
     ]
 
 
-def df_to_records(df: pd.DataFrame, colmap: dict[str, str] | None = None) -> list[dict]:
+def df_to_records(df: pd.DataFrame, colmap: dict[str, str] | None = None,
+                  all_cols=()) -> list[dict]:
+    """
+    Lignes prêtes pour Grist. Les colonnes de la table absentes du fichier (`all_cols`) sont
+    envoyées vides : sans cela, Grist y met la valeur par défaut (0 pour une colonne numérique).
+    """
     types = {c: infer_grist_type(df[c]) for c in df.columns}
     keys = [(colmap or {}).get(c, c) for c in df.columns]
+    empty = {c: None for c in all_cols if c not in keys and c not in ("id", "manualSort")}
     return [
-        {k: to_cell(v, types[c]) for k, c, v in zip(keys, df.columns, row, strict=True)}
+        {**empty, **{k: to_cell(v, types[c]) for k, c, v in zip(keys, df.columns, row, strict=True)}}
         for row in df.itertuples(index=False, name=None)
     ]
