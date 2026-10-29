@@ -64,14 +64,17 @@ function debounce(fn, ms = 700) {
 let dsCheckId = 0;
 let dsMeta = null; // métadonnées de la dernière démarche vérifiée
 
-async function checkDs({ showFilters = false } = {}) {
+async function runCheckDs() {
   const ds_token = $("ds_token").value.trim();
   const demarche_number = $("demarche_number").value.trim();
   if (!ds_token || !demarche_number) {
     setStatus("ds-status", "", "");
     dsMeta = null;
+    resetAfterDs();
     return false;
   }
+  // Déjà validé avec ces valeurs : inutile de revérifier (ex. sortie du champ sans modification)
+  if (dsMeta?.key === `${demarche_number}|${ds_token}`) return true;
   const id = ++dsCheckId;
   setStatus("ds-status", "sqrrl-wait", "Vérification de la démarche…");
   try {
@@ -81,7 +84,7 @@ async function checkDs({ showFilters = false } = {}) {
       body: JSON.stringify({ ds_token, demarche_number: parseInt(demarche_number) }),
     });
     const data = await res.json();
-    if (id !== dsCheckId) return false; // une saisie plus récente a pris le relais
+    if (id !== dsCheckId) return dsPromise; // une vérification plus récente a pris le relais
     if (data.error) throw new Error(data.error);
 
     const key = `${demarche_number}|${ds_token}`;
@@ -93,20 +96,13 @@ async function checkDs({ showFilters = false } = {}) {
       "sqrrl-ok",
       `✓ Démarche n° ${demarche_number} : ${data.title || "(sans titre)"} · ${n} groupe${n > 1 ? "s" : ""} instructeur${n > 1 ? "s" : ""}`,
     );
-    if (changed || showFilters) {
-      $("filters-title").textContent = data.title || `Démarche #${demarche_number}`;
-      renderStateOptions(data.states);
-      renderGroupesOptions(data.groupes);
-      show("step-filters");
-      hide("step-2");
-      hide("step-progress");
-    }
+    if (changed) resetAfterDs(); // autre démarche : les filtres affichés ne sont plus valables
+    updateAnalyzeBtn();
     return true;
   } catch (e) {
-    if (id !== dsCheckId) return false;
+    if (id !== dsCheckId) return dsPromise;
     dsMeta = null;
-    hide("step-filters");
-    hide("step-2");
+    resetAfterDs();
     setStatus("ds-status", "sqrrl-ko", `✗ ${dsErrorMessage(e.message)}`);
     return false;
   }
@@ -119,18 +115,35 @@ function dsErrorMessage(msg) {
   return msg;
 }
 
+// Une vérification remplacée par une plus récente renvoie le résultat de cette dernière
+let dsPromise = Promise.resolve(false);
+let gristPromise = Promise.resolve(false);
+function checkDs() {
+  dsPromise = runCheckDs();
+  return dsPromise;
+}
+function checkGrist() {
+  gristPromise = runCheckGrist();
+  return gristPromise;
+}
+
 let gristCheckId = 0;
 let gristOk = false;
+let gristKey = null; // valeurs (document|token) du dernier contrôle réussi
 
-async function checkGrist() {
+async function runCheckGrist() {
   const grist_token = $("grist_token").value.trim();
   const doc_id = $("doc_id").value.trim();
+  const key = `${doc_id}|${grist_token}`;
+  if (gristOk && gristKey === key) return true; // déjà validé avec ces valeurs
   gristOk = false;
   if (!grist_token || !doc_id) {
     setStatus("grist-status", "", "");
+    updateAnalyzeBtn();
     return false;
   }
   const id = ++gristCheckId;
+  updateAnalyzeBtn();
   setStatus("grist-status", "sqrrl-wait", "Vérification du document Grist…");
   try {
     const res = await fetch("/api/grist-check", {
@@ -139,9 +152,11 @@ async function checkGrist() {
       body: JSON.stringify({ grist_token, doc_id }),
     });
     const data = await res.json();
-    if (id !== gristCheckId) return false;
+    if (id !== gristCheckId) return gristPromise;
     if (data.error) throw new Error(data.error);
     gristOk = true;
+    gristKey = key;
+    updateAnalyzeBtn();
     const n = data.tables.length;
     setStatus(
       "grist-status",
@@ -150,8 +165,9 @@ async function checkGrist() {
     );
     return true;
   } catch (e) {
-    if (id !== gristCheckId) return false;
+    if (id !== gristCheckId) return gristPromise;
     setStatus("grist-status", "sqrrl-ko", `✗ ${e.message}`);
+    updateAnalyzeBtn();
     return false;
   }
 }
@@ -167,18 +183,39 @@ const checkGristLater = debounce(() => checkGrist());
   $(id).addEventListener("change", () => checkGrist());
 });
 
+// Le bouton « Analyser » n'est actif que si la démarche et le document Grist sont validés
+function updateAnalyzeBtn() {
+  const ok = Boolean(dsMeta) && gristOk;
+  const btn = $("btn-analyze");
+  btn.disabled = !ok;
+  btn.title = ok ? "" : "Renseignez et validez d'abord la démarche DN et le document Grist";
+}
+
+function resetAfterDs() {
+  hide("step-filters");
+  hide("step-2");
+  hide("step-progress");
+  updateAnalyzeBtn();
+}
+
 $("btn-analyze").addEventListener("click", async () => {
   const btn = $("btn-analyze");
   const label = btn.textContent;
-  if (!$("ds_token").value.trim() || !$("demarche_number").value.trim()) {
-    toast("Token DS et numéro de démarche requis", "error");
-    return;
-  }
   setLoading(btn, true, label);
   try {
-    await Promise.all([checkDs({ showFilters: true }), checkGrist()]);
+    const [dsOk, gOk] = await Promise.all([checkDs(), checkGrist()]);
+    if (!dsOk || !gOk) return;
+    const demarche_number = $("demarche_number").value.trim();
+    $("filters-title").textContent = dsMeta.title || `Démarche #${demarche_number}`;
+    renderStateOptions(dsMeta.states);
+    renderGroupesOptions(dsMeta.groupes);
+    hide("analyze-steps");
+    show("step-filters");
+    hide("step-2");
+    hide("step-progress");
   } finally {
     setLoading(btn, false, label);
+    updateAnalyzeBtn();
   }
 });
 
@@ -373,35 +410,27 @@ async function readNdjson(res, onMessage) {
   }
 }
 
-// Liste d'étapes affichée pendant un traitement : l'étape en cours est marquée « … »
+// Étape en cours affichée sur une seule ligne : chaque nouvelle étape remplace la précédente
 function startSteps(id) {
-  const ul = $(id);
-  ul.innerHTML = "";
-  ul.classList.remove("fr-hidden");
-  let current = null;
-  const close = (cls, mark) => {
-    if (!current) return;
-    current.className = cls;
-    current.querySelector(".sqrrl-step-mark").textContent = mark;
-  };
-  const add = (text, cls = "sqrrl-step--current", mark = "…") => {
-    close("sqrrl-step--done", "✓");
-    current = document.createElement("li");
-    current.className = cls;
-    current.innerHTML = `<span class="sqrrl-step-mark" aria-hidden="true">${mark}</span> `;
-    current.append(document.createTextNode(text));
-    ul.appendChild(current);
+  const el = $(id);
+  el.classList.remove("fr-hidden");
+  let hideTimer = null;
+  const set = (text, cls, mark) => {
+    clearTimeout(hideTimer);
+    el.classList.add("sqrrl-step--fading");
+    setTimeout(() => {
+      el.className = `sqrrl-step fr-mt-2w fr-mb-0 ${cls}`;
+      el.innerHTML = `<span class="sqrrl-step-mark" aria-hidden="true">${mark}</span> `;
+      el.append(document.createTextNode(text));
+    }, 150);
   };
   return {
-    add,
+    add: (text) => set(text, "sqrrl-step--current", "⟳"),
     done: (text) => {
-      add(text, "sqrrl-step--done", "✓");
-      current = null;
+      set(text, "sqrrl-step--done", "✓");
+      hideTimer = setTimeout(() => el.classList.add("fr-hidden"), 3000);
     },
-    fail: (text) => {
-      add(text, "sqrrl-step--error", "✗");
-      current = null;
-    },
+    fail: (text) => set(text, "sqrrl-step--error", "✗"),
   };
 }
 
