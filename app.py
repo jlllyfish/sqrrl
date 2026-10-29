@@ -1,4 +1,3 @@
-import io
 import json
 import os
 import secrets
@@ -12,9 +11,11 @@ from flask import Flask, Response, jsonify, render_template, request, stream_wit
 from demarche import DOSSIER_STATE_LABELS, collect_fields, download_file, get_demarche_meta, iter_dossiers
 from grist import (
     add_rows, build_columns, check_existing_dossier, create_table, delete_rows,
-    df_to_records, ensure_columns, find_table, infer_grist_type, list_tables, to_cell,
+    df_to_records, ensure_columns, find_table, get_doc, infer_grist_type, list_columns,
+    list_tables, to_cell,
 )
-from utils import unique_col_ids, unique_table_names
+from tableur import ColumnRegistry, read_table
+from utils import unique_table_names
 
 app = Flask(__name__)
 
@@ -28,17 +29,21 @@ def sse(data: dict) -> str:
     return f"data: {json.dumps(data, default=str)}\n\n"
 
 
-def file_to_df(url: str, ds_token: str, dossier_number: int, filename: str):
-    """Lit un tableur. Retourne (df aux colonnes nettoyées et uniques, {id: libellé d'origine})."""
-    content = download_file(url, ds_token)
-    ext = filename.rsplit(".", 1)[-1].lower()
-    df = pd.read_excel(io.BytesIO(content), engine="odf" if ext == "ods" else None)
-    df.insert(0, "source_filename", filename)
-    df.insert(0, "dossier_number", dossier_number)
-    originals = [str(c) for c in df.columns]
-    ids = unique_col_ids(originals)
-    df.columns = ids
-    return df, dict(zip(ids, originals))
+def file_to_df(url: str, ds_token: str, dossier_number: int, filename: str,
+               registry: ColumnRegistry, options: dict) -> pd.DataFrame:
+    """Lit un tableur et retourne un DataFrame aux colonnes identifiées par le registre de la table."""
+    df = read_table(download_file(url, ds_token), filename, **options)
+    df = registry.apply(df)
+    df.insert(0, registry.id_for("source_filename"), filename)
+    df.insert(0, registry.id_for("dossier_number"), dossier_number)
+    return df
+
+
+def _read_options(body: dict) -> dict:
+    return {
+        "compact_text": bool(body.get("compact_text")),
+        "require_first_col": body.get("require_first_col", True) is not False,
+    }
 
 
 def _parse_states(raw) -> list[str] | None:
@@ -69,6 +74,20 @@ def get_meta():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/grist-check", methods=["POST"])
+def grist_check():
+    """Vérifie le token et l'ID du document Grist, retourne le nom du document."""
+    body = request.json or {}
+    if not body.get("grist_token") or not body.get("doc_id"):
+        return jsonify({"error": "Token et ID du document requis"}), 400
+    try:
+        return jsonify(get_doc(body["doc_id"].strip(), body["grist_token"].strip()))
+    except (PermissionError, LookupError) as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Grist injoignable : {e}"}), 502
+
+
 @app.route("/api/fields", methods=["POST"])
 def get_fields():
     """Analyse les premiers dossiers et retourne les champs PJ tableur trouvés, avec aperçu."""
@@ -85,33 +104,41 @@ def get_fields():
         )
         table_names = unique_table_names(fields.keys())
 
+        options = _read_options(body)
         fields_info = []
         for label, info in fields.items():
-            schema, headers, rows = [], [], []
-            try:
-                f = info["files"][0]
-                df, labels = file_to_df(f["url"], ds_token, 0, f["filename"])
-                for col in df.columns:
-                    non_null = df[col].dropna()
-                    sample = to_cell(non_null.iloc[0]) if not non_null.empty else None
-                    schema.append({
-                        "id": col, "original": labels[col],
-                        "type": infer_grist_type(df[col]),
-                        "sample": "" if sample is None else str(sample),
-                    })
-                headers = [labels[c] for c in df.columns]
-                rows = [[to_cell(v) for v in row] for row in df.head(5).itertuples(index=False, name=None)]
-            except Exception:
-                traceback.print_exc()
+            schema, headers, rows, total_rows = [], [], [], None
+            if info["files"]:
+                try:
+                    reg = ColumnRegistry()
+                    f = info["files"][0]
+                    df = file_to_df(f["url"], ds_token, 0, f["filename"], reg, options)
+                    for col in df.columns:
+                        non_null = df[col].dropna()
+                        sample = to_cell(non_null.iloc[0]) if not non_null.empty else None
+                        schema.append({"id": col, "original": reg.labels.get(col, col),
+                                       "type": infer_grist_type(df[col]),
+                                       "sample": "" if sample is None else str(sample)})
+                    headers = [reg.labels.get(c, c) for c in df.columns]
+                    rows = [[to_cell(v) for v in row]
+                            for row in df.head(5).itertuples(index=False, name=None)]
+                    total_rows = len(df)
+                except Exception:
+                    traceback.print_exc()
 
             fields_info.append({
                 "label": label,
                 "table_name": table_names[label],
                 "seen": info["seen"],
+                "found": bool(info["files"]),
+                "sample_rows": total_rows,
                 "schema": schema,
                 "headers": headers,
                 "rows": rows,
             })
+
+        # Champs avec tableur trouvé d'abord, puis les plus fréquents
+        fields_info.sort(key=lambda f: (not f["found"], -f["seen"]))
 
         return Response(json.dumps({"title": title, "scanned": scanned, "fields": fields_info}, default=str),
                         mimetype="application/json")
@@ -137,6 +164,7 @@ def start_import():
         "selected_labels": list(body["selected_labels"]),
         "states": _parse_states(body.get("states")),
         "groupe_numbers": _parse_groupes(body.get("groupe_numbers")),
+        "options": _read_options(body),
         "created": time.time(),
     }
     job_id = secrets.token_urlsafe(16)
@@ -163,6 +191,7 @@ def import_stream():
         tables = unique_table_names(labels)          # label → ID de table (réel une fois connu)
         exists = {lab: False for lab in labels}
         colmap = {lab: {} for lab in labels}         # label → {id voulu: id réel}
+        registries = {lab: ColumnRegistry() for lab in labels}
         stats = {lab: {"imported": 0, "skipped": 0, "errors": 0} for lab in labels}
         step = 0
 
@@ -172,6 +201,8 @@ def import_stream():
                 real = find_table(tables[lab], existing_tables)
                 if real:
                     tables[lab], exists[lab] = real, True
+                    # Les en-têtes déjà présents dans Grist gardent leur colonne
+                    registries[lab].seed(list_columns(doc_id, real, grist_token))
 
             for kind, payload in iter_dossiers(job["demarche_number"], ds_token,
                                                states=job["states"], groupe_numbers=job["groupe_numbers"]):
@@ -214,12 +245,11 @@ def import_stream():
 
                     # Téléchargement + concaténation
                     try:
-                        dfs, col_labels = [], {}
-                        for f in files:
-                            df, lbls = file_to_df(f["url"], ds_token, num, f["filename"])
-                            dfs.append(df)
-                            col_labels.update(lbls)
+                        reg = registries[lab]
+                        dfs = [file_to_df(f["url"], ds_token, num, f["filename"], reg, job["options"])
+                               for f in files]
                         merged = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+                        col_labels = reg.labels
                     except Exception as e:
                         stats[lab]["errors"] += 1
                         yield ev("error", msg=f"Lecture fichier : {e}")

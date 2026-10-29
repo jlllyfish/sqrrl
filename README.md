@@ -6,12 +6,20 @@ Import des pièces jointes tableur (.xlsx, .xls, .ods) d'une démarche **Démarc
 
 1. Saisie des tokens DS et Grist, du n° de démarche et de l'ID du document Grist.
 2. Filtres : statuts (un ou plusieurs) et groupes instructeurs.
-3. Analyse des 50 premiers dossiers : liste des champs PJ tableur (y compris dans les blocs répétables) avec aperçu et types déduits.
+   Le token DS et le numéro de démarche sont vérifiés à la saisie (titre affiché), de même que le token et l'ID Grist (nom du document affiché).
+3. Analyse : tous les champs PJ du schéma de la démarche (y compris blocs répétables), avec un aperçu pris dans les 100 dossiers les plus récents. Un champ ajouté tardivement à la démarche est donc bien proposé.
 4. Import en flux (SSE) de tous les dossiers filtrés. Pour chaque champ :
    - la table est créée si besoin, les colonnes nouvelles sont ajoutées au fil de l'eau ;
    - doublons (même `dossier_number`) : **Ignorer**, **Remplacer** (nouvelles lignes insérées avant suppression des anciennes) ou **Ajouter quand même**.
 
-Seule la première feuille de chaque classeur est lue.
+### Tableurs mal formatés
+
+Seule la première feuille est lue. Sont gérés automatiquement :
+- en-têtes écrits différemment d'un fichier à l'autre (retours à la ligne, espaces, ponctuation) : rapprochés dans la même colonne Grist ;
+- blocs de colonnes recopiés côte à côte au lieu d'ajouter des lignes : empilés ;
+- colonnes et lignes vides, nombres entiers lus comme décimaux.
+
+Options : ignorer les lignes sans valeur en 1re colonne (totaux, notes), supprimer les espaces dans les valeurs texte (identifiants type « FR64 1514 3204 »).
 
 ## Installation
 

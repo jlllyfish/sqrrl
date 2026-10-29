@@ -29,6 +29,19 @@ def _chunks(items: list, size: int = BATCH_SIZE):
         yield items[i:i + size]
 
 
+# ── Document ──────────────────────────────────────────────────────────────────
+
+def get_doc(doc_id: str, api_key: str) -> dict:
+    """Nom du document et liste de ses tables (vérifie au passage token et ID)."""
+    r = requests.get(f"{GRIST_BASE_URL}/api/docs/{doc_id}", headers=_headers(api_key), timeout=TIMEOUT)
+    if r.status_code in (401, 403):
+        raise PermissionError("Token Grist refusé ou sans accès à ce document")
+    if r.status_code == 404:
+        raise LookupError("Document introuvable : vérifiez l'ID")
+    r.raise_for_status()
+    return {"name": r.json().get("name", ""), "tables": list_tables(doc_id, api_key)}
+
+
 # ── Tables ────────────────────────────────────────────────────────────────────
 
 def list_tables(doc_id: str, api_key: str) -> list[str]:
@@ -165,6 +178,10 @@ def to_cell(v, grist_type: str = "Text"):
         return None
     if hasattr(v, "isoformat"):  # datetime.time…
         return v.isoformat()
+    if grist_type == "Text" and not isinstance(v, str):
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        return str(v)
     return v
 
 
