@@ -56,8 +56,11 @@ fragment DossierPJ on Dossier {
 }
 """
 
-def _dossiers_query(root: str, with_order: bool = False) -> str:
-    """Query de liste de dossiers, via la démarche ou un groupe instructeur."""
+def _dossiers_query(root: str, with_order: bool = False, light: bool = False) -> str:
+    """
+    Query de liste de dossiers, via la démarche ou un groupe instructeur.
+    `light` : numéros seulement (comptage rapide, sans les champs).
+    """
     if root == "demarche":
         var, field = "$demarcheNumber: Int!", "demarche(number: $demarcheNumber)"
     else:
@@ -69,11 +72,11 @@ query Q({var}, $state: DossierState, $after: String{order_var}) {{
   {field} {{
     dossiers(first: 100, after: $after, state: $state{order_arg}) {{
       pageInfo {{ hasNextPage endCursor }}
-      nodes {{ ...DossierPJ }}
+      nodes {{ {"number" if light else "...DossierPJ"} }}
     }}
   }}
 }}
-""" + _DOSSIER_FIELDS
+""" + ("" if light else _DOSSIER_FIELDS)
 
 
 QUERY_DEMARCHE = _dossiers_query("demarche")
@@ -207,15 +210,15 @@ def get_schema_pj_labels(demarche_number: int, token: str) -> list[str]:
     return list(dict.fromkeys(labels))
 
 
-def _iter_all(demarche_number, token, states=None, groupe_numbers=None, newest_first=False):
+def _iter_all(demarche_number, token, states=None, groupe_numbers=None, newest_first=False, light=False):
     """
     Parcourt les dossiers filtrés. L'API DS n'accepte qu'un statut par requête :
     on boucle sur chaque statut (et chaque groupe), en dédoublonnant.
     """
     states = states or [None]
     extra = {"order": "DESC"} if newest_first else {}
-    q_dem = _dossiers_query("demarche", newest_first)
-    q_grp = _dossiers_query("groupe", newest_first)
+    q_dem = _dossiers_query("demarche", newest_first, light)
+    q_grp = _dossiers_query("groupe", newest_first, light)
     seen = set()
     sources = (
         [(q_grp, {"groupeNumber": g, "state": s, **extra}, "groupeInstructeur")
@@ -279,9 +282,15 @@ def scan_fields(demarche_number, token, states=None, groupe_numbers=None,
     yield ("result", (title, fields, scanned))
 
 
+def count_dossiers(demarche_number, token, states=None, groupe_numbers=None) -> int:
+    """Nombre de dossiers correspondant aux filtres (l'API ne fournit pas de total : requête légère)."""
+    return sum(1 for _ in _iter_all(demarche_number, token, states, groupe_numbers, light=True))
+
+
 def iter_dossiers(demarche_number, token, states=None, groupe_numbers=None):
-    """yield ("meta", {...}) puis ("dossier", {...})… puis ("done", {...})."""
+    """yield ("meta", {...}), ("count", {...}), puis ("dossier", {...})… puis ("done", {...})."""
     yield ("meta", {"title": get_demarche_meta(demarche_number, token)["title"]})
+    yield ("count", {"total": count_dossiers(demarche_number, token, states, groupe_numbers)})
     total = 0
     for node in _iter_all(demarche_number, token, states, groupe_numbers):
         total += 1

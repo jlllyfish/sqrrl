@@ -267,6 +267,9 @@ def import_stream():
                     yield sse({"type": "meta", "title": payload["title"],
                                "tables": [{"label": lb, "table": tables[lb]} for lb in labels]})
                     continue
+                if kind == "count":
+                    yield sse({"type": "count", "total": payload["total"]})
+                    continue
                 if kind == "done":
                     yield sse({"type": "done", "total": payload["total"], "stats": stats})
                     return

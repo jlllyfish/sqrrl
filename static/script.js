@@ -606,11 +606,21 @@ $("btn-import").addEventListener("click", async () => {
   }
 
   const bar = $("progress-bar");
-  bar.style.width = "0%";
+  bar.style.width = ""; // laisse la classe « indeterminate » fixer la largeur pendant le comptage
   bar.style.background = "";
   bar.classList.add("indeterminate");
-  $("prog-step").textContent = "0";
-  $("prog-total").textContent = "?";
+  let total = null;
+  const fmt = (n) => n.toLocaleString("fr-FR");
+  const setProgress = (step) => {
+    if (!total) {
+      $("prog-text").textContent = `${fmt(step)} dossier${step > 1 ? "s" : ""} traité${step > 1 ? "s" : ""}`;
+      return;
+    }
+    const pct = Math.min(100, Math.round((step / total) * 100));
+    bar.style.width = `${pct}%`;
+    $("prog-text").textContent = `${fmt(step)} / ${fmt(total)} dossiers traités · ${pct} %`;
+  };
+  $("prog-text").textContent = "Comptage des dossiers à importer…";
   $("progress-log").innerHTML = "";
   $("table-stats").innerHTML = "";
   $("progress-title").textContent = "Import en cours…";
@@ -651,8 +661,13 @@ $("btn-import").addEventListener("click", async () => {
       (msg.tables || []).forEach((t) => tableStats[t.label] && (tableStats[t.label].table = t.table));
       renderTableStats(tableStats);
     }
+    if (msg.type === "count") {
+      total = msg.total;
+      bar.classList.remove("indeterminate");
+      setProgress(0);
+    }
     if (msg.type === "progress") {
-      $("prog-step").textContent = msg.step;
+      setProgress(msg.step);
       addLog(`Dossier #${msg.dossier}…`, "sqrrl-log-skip");
     }
     if (msg.type === "imported") {
@@ -679,10 +694,10 @@ $("btn-import").addEventListener("click", async () => {
     }
     if (msg.type === "done") {
       finish();
-      $("prog-total").textContent = msg.total;
+      total = msg.total;
       bar.style.width = "100%";
-      const totalImported = Object.values(tableStats).reduce((s, t) => s + t.imported, 0);
-      $("progress-title").textContent = `✓ Terminé — ${totalImported} import(s) pour ${msg.total} dossier(s)`;
+      $("prog-text").textContent = `${fmt(msg.total)} / ${fmt(msg.total)} dossiers traités · 100 %`;
+      $("progress-title").textContent = `✓ Import terminé — ${fmt(msg.total)} dossier${msg.total > 1 ? "s" : ""} traité${msg.total > 1 ? "s" : ""}`;
       addLog("✓ Import terminé", "sqrrl-log-ok");
     }
   };
