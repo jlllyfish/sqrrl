@@ -24,7 +24,7 @@ python app.py
 
 Puis http://localhost:5000.
 
-Le [DSFR](https://github.com/GouvernementFR/dsfr/releases) doit être placé dans `static/dsfr/` (fichiers `dist`), et le logo dans `static/logo-sqrrl.svg`.
+`static/dsfr/` contient une version allégée du [DSFR](https://github.com/GouvernementFR/dsfr) : CSS principal, polices Marianne (woff2), icônes système et icônes utilisées par les composants. Pas de JS DSFR (aucun composant interactif).
 
 ## Sécurité
 
