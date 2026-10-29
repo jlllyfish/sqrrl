@@ -49,6 +49,7 @@ JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 JOB_TTL = 300  # secondes
 DUPLICATE_MODES = ("skip", "update", "append")
+SUGGEST_MIN_ROWS = 5
 
 
 def sse(data: dict) -> str:
@@ -101,11 +102,15 @@ def build_preview(content: bytes, f: dict, options: dict, preset: str | None) ->
 
 
 def suggest_preset(content: bytes, kind: str) -> str | None:
-    """Modèle dont la colonne clé est reconnue dans le fichier d'exemple, s'il y en a un."""
+    """
+    Modèle à proposer pour ce fichier d'exemple, s'il y en a un. Critère strict pour éviter les
+    faux positifs : la colonne clé doit être reconnue sous sa forme complète (ex. « FR » + 10 chiffres,
+    pas 10 chiffres seuls, qui pourraient être des numéros de téléphone) sur au moins 5 lignes.
+    """
     raw = read_raw(content, kind)
     for key, preset in PRESETS.items():
-        df, _ = extract(raw, preset["targets"])
-        if len(df):
+        df, _ = extract(raw, preset["targets"], strict=True)
+        if len(df) >= SUGGEST_MIN_ROWS or (len(df) and len(df) >= 0.8 * raw.dropna(how="all").shape[0] - 2):
             return key
     return None
 

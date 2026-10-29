@@ -38,6 +38,13 @@ def _bovin(v):
     return (m.group(1) or "FR") + m.group(2)
 
 
+def _bovin_strict(v):
+    """N° de bovin avec code pays explicite (FR…) : sert à proposer le modèle sans faux positifs."""
+    s = _compact(v)
+    m = _BOVIN_RE.match(s) if s else None
+    return (m.group(1) + m.group(2)) if m and m.group(1) else None
+
+
 def _ede(v):
     s = _compact(v)
     m = _EDE_RE.match(s) if s else None
@@ -65,6 +72,8 @@ TYPES = {
     "ede": ("N° EDE (8 chiffres, préfixe « EDE » toléré)", _ede),
     "date": ("Date", _date),
 }
+# Variantes strictes, utilisées seulement pour décider de proposer un modèle
+STRICT = {"bovin": _bovin_strict}
 
 # Modèles proposés dans l'interface : liste de colonnes cibles, la 1re est la clé
 PRESETS = {
@@ -92,7 +101,7 @@ def _ratio(series: pd.Series, fn) -> float:
     return sum(fn(v) is not None for v in values) / len(values)
 
 
-def extract(raw: pd.DataFrame, targets: list[dict]) -> tuple[pd.DataFrame, dict]:
+def extract(raw: pd.DataFrame, targets: list[dict], strict: bool = False) -> tuple[pd.DataFrame, dict]:
     """
     Extrait les colonnes cibles d'une feuille lue sans en-tête.
     Retourne (DataFrame aux colonnes cibles, diagnostic {cible: [colonnes sources]}).
@@ -103,6 +112,8 @@ def extract(raw: pd.DataFrame, targets: list[dict]) -> tuple[pd.DataFrame, dict]
         return pd.DataFrame(columns=names), {}
     cols = list(raw.columns)  # positions d'origine dans la feuille (pour le diagnostic A, B, C…)
     fns = [TYPES[t["type"]][1] for t in targets]
+    if strict:
+        fns[0] = STRICT.get(targets[0]["type"], fns[0])
     ratios = {(i, p): _ratio(raw[cols[p]], fn) for i, fn in enumerate(fns) for p in range(len(cols))}
 
     # Colonnes clés : une par bloc (blocs recopiés côte à côte → plusieurs colonnes clés)
