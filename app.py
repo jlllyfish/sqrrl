@@ -29,10 +29,11 @@ def sse(data: dict) -> str:
     return f"data: {json.dumps(data, default=str)}\n\n"
 
 
-def file_to_df(url: str, ds_token: str, dossier_number: int, filename: str,
+def file_to_df(f: dict, ds_token: str, dossier_number: int,
                registry: ColumnRegistry, options: dict) -> pd.DataFrame:
-    """Lit un tableur et retourne un DataFrame aux colonnes identifiées par le registre de la table."""
-    df = read_table(download_file(url, ds_token), filename, **options)
+    """Lit un tableur DS et retourne un DataFrame aux colonnes identifiées par le registre de la table."""
+    filename = (f.get("filename") or "").strip()
+    df = read_table(download_file(f["url"], ds_token), f["kind"], **options)
     df = registry.apply(df)
     df.insert(0, registry.id_for("source_filename"), filename)
     df.insert(0, registry.id_for("dossier_number"), dossier_number)
@@ -112,7 +113,7 @@ def get_fields():
                 try:
                     reg = ColumnRegistry()
                     f = info["files"][0]
-                    df = file_to_df(f["url"], ds_token, 0, f["filename"], reg, options)
+                    df = file_to_df(f, ds_token, 0, reg, options)
                     for col in df.columns:
                         non_null = df[col].dropna()
                         sample = to_cell(non_null.iloc[0]) if not non_null.empty else None
@@ -131,6 +132,8 @@ def get_fields():
                 "table_name": table_names[label],
                 "seen": info["seen"],
                 "found": bool(info["files"]),
+                "pj_seen": info["pj_seen"],
+                "exts": info["exts"],
                 "sample_rows": total_rows,
                 "schema": schema,
                 "headers": headers,
@@ -246,7 +249,7 @@ def import_stream():
                     # Téléchargement + concaténation
                     try:
                         reg = registries[lab]
-                        dfs = [file_to_df(f["url"], ds_token, num, f["filename"], reg, job["options"])
+                        dfs = [file_to_df(f, ds_token, num, reg, job["options"])
                                for f in files]
                         merged = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
                         col_labels = reg.labels

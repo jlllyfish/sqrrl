@@ -49,14 +49,25 @@ def _strip(v):
     return re.sub(r"[  ]+", " ", v).strip() if isinstance(v, str) else v
 
 
-def read_table(content: bytes, filename: str, compact_text: bool = False,
+def _read_raw(content: bytes, kind: str) -> pd.DataFrame:
+    if kind == "csv":
+        for enc in ("utf-8-sig", "cp1252"):
+            try:
+                return pd.read_csv(io.BytesIO(content), header=None, sep=None, engine="python",
+                                   encoding=enc, dtype=object)
+            except UnicodeDecodeError:
+                continue
+        raise ValueError("Encodage CSV non reconnu")
+    return pd.read_excel(io.BytesIO(content), header=None, engine="odf" if kind == "ods" else None)
+
+
+def read_table(content: bytes, kind: str, compact_text: bool = False,
                require_first_col: bool = True) -> pd.DataFrame:
     """
     Lit la première feuille et retourne un DataFrame aux en-têtes nettoyés, blocs répétés empilés.
     `require_first_col` : ignore les lignes dont la 1re colonne est vide (totaux, notes…).
     """
-    ext = filename.rsplit(".", 1)[-1].lower()
-    raw = pd.read_excel(io.BytesIO(content), header=None, engine="odf" if ext == "ods" else None)
+    raw = _read_raw(content, kind)
     raw = raw.dropna(how="all").dropna(axis=1, how="all")
     if raw.empty:
         return pd.DataFrame()

@@ -369,7 +369,7 @@ function renderFields(fields) {
     h.textContent = `Autres champs pièce justificative (${others.length})`;
     const hint = document.createElement("p");
     hint.className = "fr-text--sm fr-text-mention--grey fr-mb-1w";
-    hint.textContent = `Aucun tableur trouvé dans les ${state.scanned} dossiers les plus récents. Vous pouvez les cocher : les dossiers qui en contiennent seront importés.`;
+    hint.textContent = `Aucun tableur (.xlsx, .xls, .ods, .csv) trouvé dans les ${state.scanned} dossiers les plus récents. Vous pouvez les cocher : les dossiers qui en contiennent seront importés.`;
     list.append(h, hint);
     others.forEach((f) => list.appendChild(fieldCard(f, false)));
   }
@@ -384,6 +384,17 @@ function fieldCard(f, checked) {
          ${f.seen} / ${state.scanned} dossier${state.scanned > 1 ? "s" : ""}
        </span>`
     : `<span class="fr-badge fr-badge--sm fr-badge--warning">aucun tableur trouvé</span>`;
+  const exts = Object.entries(f.exts || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([e, n]) => `${esc(e)} ×${n}`)
+    .join(", ");
+  const diag = f.found
+    ? ""
+    : `<p class="fr-text--xs fr-text-mention--grey fr-mt-1w fr-mb-0">${
+        f.pj_seen
+          ? `Fichiers déposés dans ${f.pj_seen} dossier${f.pj_seen > 1 ? "s" : ""} : ${exts}`
+          : "Aucun fichier déposé dans les dossiers analysés"
+      }</p>`;
   const rowsInfo =
     f.sample_rows != null
       ? `<p class="fr-text--xs fr-text-mention--grey fr-mt-1w fr-mb-0">Exemple : ${f.sample_rows} ligne${f.sample_rows > 1 ? "s" : ""} après nettoyage</p>`
@@ -399,7 +410,7 @@ function fieldCard(f, checked) {
         <span class="fr-text--sm fr-text-mention--grey">→ ${esc(f.table_name)}</span>
       </div>
     </div>
-    ${f.headers.length ? renderMiniGrid(f) + rowsInfo : f.found ? '<p class="fr-text--sm fr-text-mention--grey fr-mt-1w">Aperçu indisponible</p>' : ""}
+    ${f.headers.length ? renderMiniGrid(f) + rowsInfo : f.found ? '<p class="fr-text--sm fr-text-mention--grey fr-mt-1w">Aperçu indisponible</p>' : diag}
   `;
   const cb = div.querySelector(".field-check");
   cb.dataset.label = f.label; // via dataset : pas d'échappement nécessaire

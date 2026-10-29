@@ -7,7 +7,15 @@ load_dotenv()
 
 DS_API_URL = os.getenv("DS_API_URL", "https://demarche.numerique.gouv.fr/api/v2/graphql")
 TIMEOUT = 60
-SPREADSHEET_EXT = (".xlsx", ".xls", ".ods")
+# Formats tableur reconnus : par extension, ou à défaut par type MIME
+SPREADSHEET_EXT = {"xlsx": "xlsx", "xlsm": "xlsx", "xls": "xls", "ods": "ods", "csv": "csv"}
+SPREADSHEET_MIME = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.ms-excel.sheet.macroenabled.12": "xlsx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.oasis.opendocument.spreadsheet": "ods",
+    "text/csv": "csv",
+}
 
 DOSSIER_STATE_LABELS = {
     "en_construction": "En construction",
@@ -88,42 +96,72 @@ fragment Desc on ChampDescriptor {
 
 
 def _gql(token: str, query: str, variables: dict) -> dict:
+    """
+    Exécute une requête GraphQL. Les erreurs partielles (un dossier ou un fichier illisible,
+    par ex. un fichier en cours d'analyse antivirus) n'empêchent pas d'exploiter le reste.
+    """
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     resp = requests.post(DS_API_URL, json={"query": query, "variables": variables},
                          headers=headers, timeout=TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
     if data.get("errors"):
-        raise ValueError(f"Erreur GraphQL : {data['errors']}")
+        if not data.get("data"):
+            raise ValueError(f"Erreur GraphQL : {data['errors']}")
+        print(f"[DS] {len(data['errors'])} erreur(s) partielle(s) : {data['errors'][0].get('message')}")
     return data["data"]
 
 
+def file_kind(f: dict) -> str | None:
+    """Type de tableur d'un fichier DS (xlsx, xls, ods, csv), ou None."""
+    name = (f.get("filename") or "").strip().lower()
+    ext = name.rsplit(".", 1)[-1] if "." in name else ""
+    if ext in SPREADSHEET_EXT:
+        return SPREADSHEET_EXT[ext]
+    return SPREADSHEET_MIME.get((f.get("contentType") or "").split(";")[0].strip().lower())
+
+
+def file_ext(f: dict) -> str:
+    """Extension affichable (pour le diagnostic)."""
+    name = (f.get("filename") or "").strip().lower()
+    return name.rsplit(".", 1)[-1] if "." in name else (f.get("contentType") or "?")
+
+
 def _spreadsheets(champ: dict) -> list[dict]:
-    return [
-        f for f in (champ.get("files") or [])
-        if (f.get("filename") or "").lower().endswith(SPREADSHEET_EXT)
-    ]
+    out = []
+    for f in champ.get("files") or []:
+        if f and f.get("url"):
+            kind = file_kind(f)
+            if kind:
+                out.append({**f, "kind": kind})
+    return out
 
 
-def _extract_tableur_fields(dossier: dict) -> dict[str, list[dict]]:
-    """{label: [fichiers]} — les champs de même label sont fusionnés, pas écrasés."""
+def _all_pj(dossier: dict) -> dict[str, list[dict]]:
+    """{label: [tous les fichiers]} pour chaque champ PJ du dossier (y compris blocs répétables)."""
     result: dict[str, list[dict]] = {}
-
-    def add(label, files):
-        if files:
-            result.setdefault(label, []).extend(files)
-
     for champ in (dossier.get("champs") or []) + (dossier.get("annotations") or []):
         if not champ:
             continue
         if champ.get("__typename") == "RepetitionChamp":
             parent = champ.get("label", "")
             for row in champ.get("rows") or []:
-                for sub in row.get("champs") or []:
+                for sub in (row or {}).get("champs") or []:
                     if sub and sub.get("__typename") == "PieceJustificativeChamp":
-                        add(f"{parent} - {sub.get('label', '')}", _spreadsheets(sub))
+                        result.setdefault(f"{parent} - {sub.get('label', '')}", []).extend(
+                            f for f in sub.get("files") or [] if f)
         elif champ.get("__typename") == "PieceJustificativeChamp":
-            add(champ.get("label", ""), _spreadsheets(champ))
+            result.setdefault(champ.get("label", ""), []).extend(f for f in champ.get("files") or [] if f)
+    return result
+
+
+def _extract_tableur_fields(dossier: dict) -> dict[str, list[dict]]:
+    """{label: [fichiers tableur]} — les champs de même label sont fusionnés, pas écrasés."""
+    result = {}
+    for label, files in _all_pj(dossier).items():
+        sheets = _spreadsheets({"files": files})
+        if sheets:
+            result[label] = sheets
     return result
 
 
@@ -186,39 +224,44 @@ def _iter_all(demarche_number, token, states=None, groupe_numbers=None, newest_f
     )
     for query, vars_, root in sources:
         for node in _iter_nodes(token, query, vars_, root):
-            if node["number"] in seen:
+            if not node or node["number"] in seen:
                 continue
             seen.add(node["number"])
             yield node
 
 
-def collect_fields(demarche_number, token, states=None, groupe_numbers=None, max_dossiers=100):
+def collect_fields(demarche_number, token, states=None, groupe_numbers=None,
+                   min_dossiers=100, max_dossiers=500):
     """
-    Liste les champs PJ (schéma de la démarche + dossiers les plus récents) et retourne
-    (titre, {label: {"files": fichiers d'exemple ou [], "seen": nb de dossiers}}, nb analysés).
+    Liste les champs PJ (schéma de la démarche + dossiers les plus récents).
+    Analyse au moins `min_dossiers` dossiers, et continue jusqu'à `max_dossiers` tant qu'un champ
+    du schéma n'a pas d'exemple de tableur.
+    Retourne (titre, {label: {"files", "seen", "pj_seen", "exts"}}, nb analysés).
     """
     title = get_demarche_meta(demarche_number, token)["title"]
-    fields = {label: {"files": [], "seen": 0} for label in get_schema_pj_labels(demarche_number, token)}
+    schema_labels = get_schema_pj_labels(demarche_number, token)
+    new = lambda: {"files": [], "seen": 0, "pj_seen": 0, "exts": {}}
+    fields = {label: new() for label in schema_labels}
 
-    def scan(newest_first):
-        n = 0
-        for node in _iter_all(demarche_number, token, states, groupe_numbers, newest_first):
-            n += 1
-            for label, files in _extract_tableur_fields(node).items():
-                entry = fields.setdefault(label, {"files": [], "seen": 0})
+    scanned = 0
+    for node in _iter_all(demarche_number, token, states, groupe_numbers, newest_first=True):
+        scanned += 1
+        for label, files in _all_pj(node).items():
+            entry = fields.setdefault(label, new())
+            if files:
+                entry["pj_seen"] += 1
+            for f in files:
+                ext = file_ext(f)
+                entry["exts"][ext] = entry["exts"].get(ext, 0) + 1
+            sheets = _spreadsheets({"files": files})
+            if sheets:
                 entry["seen"] += 1
                 if not entry["files"]:
-                    entry["files"] = files
-            if n >= max_dossiers:
-                break
-        return n
-
-    try:
-        scanned = scan(newest_first=True)
-    except ValueError:  # API sans tri : on retombe sur l'ordre par défaut
-        for e in fields.values():
-            e.update(files=[], seen=0)
-        scanned = scan(newest_first=False)
+                    entry["files"] = sheets
+        if scanned >= max_dossiers:
+            break
+        if scanned >= min_dossiers and all(fields[l]["files"] for l in schema_labels):
+            break
     return title, fields, scanned
 
 
